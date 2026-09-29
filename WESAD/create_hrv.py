@@ -14,12 +14,8 @@ from hrvanalysis import get_nn_intervals, get_time_domain_features, get_frequenc
 
 warnings.filterwarnings("ignore")
 
-# ============================================================
-# 1. 路徑與參數
-# ============================================================
-
-WESAD_DIR = "/mnt/sdb/justin/Stress-Detection/ICASSP2027/LLM_Rewrite/WESAD/WESAD"
-OUTPUT_DIR = "/mnt/sdb/justin/Stress-Detection/ICASSP2027/LLM_Rewrite/WESAD/Features"
+WESAD_DIR = "./WESAD"
+OUTPUT_DIR = "./data"
 OUTPUT_FILE = os.path.join(OUTPUT_DIR, "wesad_ecg_hrv_60sec_step0.25sec_61features.csv")
 MAPPING_FILE = os.path.join(OUTPUT_DIR, "hrv_feature_mapping_ecg_61features.csv")
 
@@ -42,22 +38,6 @@ VALID_PROTOCOL_LABELS = [1, 2, 3]
 CONDITION_NAMES = {1: "baseline", 2: "stress", 3: "amusement"}
 THREE_CLASS_MAP = {1: 0, 2: 1, 3: 2}
 BINARY_MAP = {1: 0, 2: 1, 3: 0}
-
-# ============================================================
-# 2. 與 Firefighter 完全相同的 64 -> 61 feature selection
-#
-# Firefighter 原始：
-# 0~63 = 64 physiological features
-#
-# 移除：
-# 7  = mean_abs_diff1
-# 9  = nMAE2_diff1
-# 10 = total_power
-#
-# 64 - 3 = 61
-#
-# rr_coverage 不包含在這 64 個 features 裡
-# ============================================================
 
 VALID_FEATURE_IDX = [
     0,1,2,3,4,5,6,8,
@@ -155,11 +135,6 @@ def save_feature_mapping():
     print(f"Feature mapping saved to: {MAPPING_FILE}")
     return df
 
-
-# ============================================================
-# 3. 與 Firefighter 相同的 Multi-scale functions
-# ============================================================
-
 def scale(rr, s):
     rr = np.asarray(rr, dtype=float)
     if len(rr) < s: return []
@@ -242,11 +217,6 @@ def multi_scale_feats(rr):
 
     return [*mspe, *msmpe, PE_dw, *ds1, *ds2, *ds1_diff1, *ds2_diff1, ds1_sum, ds2_sum, *dmspe, *dmsmpe, dPE_dw, *dds1, *dds2, *dds1_diff1, *dds2_diff1, dds1_sum, dds2_sum, total_asym_idx]
 
-
-# ============================================================
-# 4. ECG preprocessing + global R-peak detection
-# ============================================================
-
 def bandpass_ecg(ecg, fs=ECG_FS, lowcut=5.0, highcut=20.0, order=3):
     ecg = np.asarray(ecg, dtype=float)
     nyq = fs / 2.0
@@ -276,11 +246,6 @@ def detect_r_peaks(ecg, fs=ECG_FS):
     if len(peaks) < 2: return None
     return np.asarray(peaks, dtype=int)
 
-
-# ============================================================
-# 5. R-peaks -> RR
-# ============================================================
-
 def get_window_rr(global_rpeaks, start_idx, end_idx):
     left = np.searchsorted(global_rpeaks, start_idx, side="left")
     right = np.searchsorted(global_rpeaks, end_idx, side="left")
@@ -296,11 +261,6 @@ def get_window_rr(global_rpeaks, start_idx, end_idx):
 
     rr_coverage = min(np.sum(rr) / (WINDOW_SEC * 1000.0), 1.0)
     return rr, rr_coverage
-
-
-# ============================================================
-# 6. RR -> Firefighter 完全相同的 64 -> 61 features
-# ============================================================
 
 def extract_hrv_features(rr):
     rr = np.asarray(rr, dtype=float)
@@ -377,11 +337,6 @@ def extract_hrv_features(rr):
     if not np.all(np.isfinite(selected_features)): return None
     return selected_features
 
-
-# ============================================================
-# 7. 找 protocol continuous segments
-# ============================================================
-
 def get_continuous_segments(labels):
     labels = np.asarray(labels)
     changes = np.where(np.diff(labels) != 0)[0] + 1
@@ -395,11 +350,6 @@ def get_continuous_segments(labels):
         segments.append((start_idx, end_idx, label))
 
     return segments
-
-
-# ============================================================
-# 8. 單一 subject
-# ============================================================
 
 def process_subject(subject_dir):
     subject = os.path.basename(subject_dir)
@@ -473,11 +423,6 @@ def process_subject(subject_dir):
 
     print(f"[{subject}] valid windows={len(rows)}")
     return rows
-
-
-# ============================================================
-# 9. Main
-# ============================================================
 
 def main():
     print("=" * 80)

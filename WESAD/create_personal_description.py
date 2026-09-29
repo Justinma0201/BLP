@@ -3,24 +3,14 @@ import re
 import glob
 import pandas as pd
 
+WESAD_DIR = "./WESAD"
 
-# ============================================================
-# 路徑設定
-# ============================================================
-
-WESAD_DIR = "/mnt/sdb/justin/Stress-Detection/ICASSP2027/LLM_Rewrite/WESAD/WESAD"
-
-OUTPUT_DIR = "/mnt/sdb/justin/Stress-Detection/ICASSP2027/LLM_Rewrite/WESAD/Features"
+OUTPUT_DIR = "./data"
 
 OUTPUT_FILE = os.path.join(
     OUTPUT_DIR,
     "wesad_personal_attributes.csv",
 )
-
-
-# ============================================================
-# 工具函式
-# ============================================================
 
 def clean_value(value):
     if value is None:
@@ -60,11 +50,6 @@ def yes_no(value):
         return False
 
     return None
-
-
-# ============================================================
-# 讀取一個 subject 的 readme
-# ============================================================
 
 def parse_subject_readme(readme_path):
     with open(
@@ -144,11 +129,6 @@ def parse_subject_readme(readme_path):
         "ill_today": ill_today,
     }
 
-
-# ============================================================
-# 建立統一 personal description
-# ============================================================
-
 def build_personal_description(info):
     age = info["age"]
     height = info["height"]
@@ -164,10 +144,6 @@ def build_personal_description(info):
     ill_today = yes_no(info["ill_today"])
 
     sentences = []
-
-    # --------------------------------------------------------
-    # 基本個人資訊
-    # --------------------------------------------------------
 
     if age is not None and gender is not None:
         sentence = f"The individual is a {age}-year-old {gender.lower()}"
@@ -198,18 +174,10 @@ def build_personal_description(info):
                 "."
             )
 
-    # --------------------------------------------------------
-    # Dominant hand
-    # --------------------------------------------------------
-
     if dominant_hand is not None:
         sentences.append(
             f"The individual is {dominant_hand.lower()}-hand dominant."
         )
-
-    # --------------------------------------------------------
-    # 當天狀態
-    # --------------------------------------------------------
 
     today_parts = []
 
@@ -255,10 +223,6 @@ def build_personal_description(info):
             f"On the day of data collection, the individual {today_text}."
         )
 
-    # --------------------------------------------------------
-    # 前一小時狀態
-    # --------------------------------------------------------
-
     last_hour_parts = []
 
     if coffee_last_hour is True:
@@ -287,18 +251,12 @@ def build_personal_description(info):
 
     return " ".join(sentences)
 
-
-# ============================================================
-# Main
-# ============================================================
-
 def main():
     os.makedirs(
         OUTPUT_DIR,
         exist_ok=True,
     )
 
-    # 找所有 S*_readme.txt
     readme_files = glob.glob(
         os.path.join(
             WESAD_DIR,
@@ -307,7 +265,6 @@ def main():
         )
     )
 
-    # S2, S3, ..., S17 的數字排序
     readme_files = sorted(
         readme_files,
         key=lambda x: int(
@@ -414,10 +371,6 @@ def main():
         print(
             f"\nDescription:\n{description}"
         )
-
-    # ========================================================
-    # 儲存
-    # ========================================================
 
     df = pd.DataFrame(
         rows
