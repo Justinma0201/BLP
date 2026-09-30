@@ -101,8 +101,8 @@ Values below reflect the current script defaults and can be revised for the fina
 | Learning rate (`--lr`) | 0.0005 | 0.0005 |
 | Weight decay (`--weight_decay`) | 0.0001 | 0.0001 |
 | Epochs (`--epochs`) | 400 | 400 |
-| Batch size (`--batch_size`) | 8 participants | 16 sequence chunks |
-| Gradient accumulation (`--accum_steps`) | 2 | 1 |
+| Batch size (`--batch_size`) | 16 participants | 16 sequence chunks |
+| Gradient accumulation (`--accum_steps`) | 1 | 1 |
 | Sequence length (`--seq_len`) | N/A | 128 windows |
 | Window stride (`--window_stride_sec`) | N/A | 0.25 s |
 | Contrastive sample cap (`--contrastive_max_windows`) | N/A | 512 windows |
