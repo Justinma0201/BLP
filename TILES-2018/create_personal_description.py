@@ -2,17 +2,15 @@ import pandas as pd
 
 # 載入你的資料
 df1 = pd.read_csv(
-    "/mnt/sdb/justin/Stress-Detection/Features/Attributes/Tiles/attribute/part_one-demographics.csv"
+    "./data/part_one-demographics.csv"
 )
 
 df2 = pd.read_csv(
-    "/mnt/sdb/justin/Stress-Detection/Features/Attributes/Tiles/attribute/part_two-demographics_timings.csv"
+    "./data/part_two-demographics_timings.csv"
 )
 
 df = df1.merge(df2, on="participant_id", how="inner")
 
-# 定義映射字典 (根據 Readme 內容)
-# 註：假設 0, 1, 2 對應 Readme 中的順序或 A, B, C
 mapping = {
 
     "age": {
@@ -138,7 +136,6 @@ mapping = {
 }
 
 def generate_description_en(row):
-    # 1. 根據性別動態決定代名詞 (避免使用複數的 they/their)
     gender = str(row['gender']).strip()
     if gender == 'Male':
         p_subj = "he"
@@ -149,21 +146,16 @@ def generate_description_en(row):
         p_poss = "Her"
         p_poss_lower = "her"
     else:
-        # 防呆機制：若有其他選項或缺失值，改用單數 participant
         p_subj = "the participant"
         p_poss = "The participant's"
         p_poss_lower = "the participant's"
 
-    # 2. 處理直接填空會語句不順的欄位
-    
-    # 處理 Student 欄位 (避免出現 "identified as None")
     student_val = str(row['student'])
     if student_val == 'None':
         student_desc = "is not currently enrolled in a degree program"
     else:
         student_desc = f"is currently enrolled in a {student_val} program"
 
-    # 處理 Housing 欄位 (避免出現 "reside in Own" 或 "reside in Rent")
     housing_val = str(row['housing'])
     if housing_val == 'Own':
         housing_desc = f"owns {p_poss_lower} home"
@@ -173,14 +165,9 @@ def generate_description_en(row):
         housing_desc = "lives in a shared or family housing arrangement"
     else:
         housing_desc = f"resides in {housing_val}"
-        
-    # 處理 Current Position (避免 a RN 這種母音開頭沒用 an 的文法問題)
-    position = str(row['currentposition'])
-    
 
-    # 3. 組裝 Template
-    # 注意：row['englyrs'] 的 mapping 已經包含 'years'，所以把 template 裡的 years 拿掉
-    # 注意：row['nurseyears'] 同理，把後面的 years 拿掉避免重複
+    position = str(row['currentposition'])
+
     template = (
         f"{row['participant_id']} is a {gender.lower()} participant in the {row['age']} age group, "
         f"and {student_desc}. Professionally, {p_subj} works as a(n) {position}, "
@@ -195,19 +182,16 @@ def generate_description_en(row):
     )
     return template
 
-# 執行轉換
 df_text = df.copy()
 for col, trans_map in mapping.items():
     if col in df_text.columns:
         df_text[col] = df_text[col].map(trans_map).fillna(df_text[col])
 df_text = df_text.fillna("Unknown")
-# 儲存結果
-df_text.to_csv('/mnt/sdb/justin/Stress-Detection/Features/Attributes/Tiles/attribute/attribute_readable.csv', index=False)
-print("轉換完成！已儲存至 attribute_readable.csv")
+df_text.to_csv('./data/attribute_readable.csv', index=False)
+print("Saved to ./data/attribute_readable.csv")
 
 df_text['Description'] = df_text.apply(generate_description_en, axis=1)
 print(df_text['Description'].iloc[0])
-df_text[['participant_id', 'Description']].to_csv('/mnt/sdb/justin/Stress-Detection/Final/data/handmade_description.csv', index=False)
+df_text[['participant_id', 'Description']].to_csv('./data/handmade_description.csv', index=False)
 
-# 查看前幾行
 print(df_text.head())

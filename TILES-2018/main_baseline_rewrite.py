@@ -1,4 +1,5 @@
 import sys
+import os
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "utils"))
 import pdb
 from sklearn.model_selection import train_test_split
@@ -11,7 +12,6 @@ import argparse
 import wandb
 from sklearn.metrics import balanced_accuracy_score, accuracy_score, f1_score, recall_score, precision_score, confusion_matrix
 from sklearn.model_selection import StratifiedKFold
-import os
 from sklearn.preprocessing import StandardScaler
 from random import sample
 import random
@@ -39,7 +39,6 @@ parser.add_argument('--loss_weight', type=int, default=1)
 parser.add_argument('--lambda_inter', type=float, default=0.0, help='Weight for Inter-ID contrastive loss')
 parser.add_argument('--lambda_intra', type=float, default=0.5, help='Weight for Intra-ID contrastive loss')
 parser.add_argument('--lambda_align', type=float, default=0.0, help='Weight for Alignment loss')
-parser.add_argument('--lambda_ortho', type=float, default=1.0, help='Weight for Orthogonal loss')
 parser.add_argument('--lambda_domain', type=float, default=0.0, help='Weight for Domain (GRL) loss')
 parser.add_argument('--weight_decay', type=float, default=1e-4)
 parser.add_argument('--select_fold', type=int, default=6)
@@ -51,8 +50,8 @@ parser.add_argument('--seed', type=int, default=123)
 parser.add_argument('--num_heads', type=int, default=2)
 parser.add_argument('--tau', default=32, type=float)
 parser.add_argument('--alpha', default=0.9, type=float)
-parser.add_argument('--batch_size', type=int, default=8)
-parser.add_argument('--accum_steps', type=int, default=2)
+parser.add_argument('--batch_size', type=int, default=16)
+parser.add_argument('--accum_steps', type=int, default=1)
 parser.add_argument('--encoder_layers', type=int, default=1)
 parser.add_argument('--weight', type=int, default=499)
 parser.add_argument('--class_loss', type=float, default=0.33)
@@ -62,15 +61,14 @@ parser.add_argument('--earlystop', type=int, default=0)
 parser.add_argument('--earlystop_limit', type=int, default=40)
 parser.add_argument('--run', type=str, default='run0')
 args = parser.parse_args()
-run = ["main"
+run = ["TILES-2018"
        ]
 num_heads = args.num_heads
 num_encoder_layers = args.encoder_layers
 word_emb_dim = 1024
-num_embeddings = 4
 original_d_model = 100
-fusion_d_model = 100
-d_model = original_d_model + word_emb_dim * num_embeddings
+fusion_d_model = 256
+d_model = original_d_model + word_emb_dim
 dropout = 0.3
 hidden_channels = 16
 out_channels = 2
@@ -126,19 +124,6 @@ class GRL(Function):
     def backward(ctx, grad_output):
         output = grad_output.neg() * ctx.alpha
         return output, None
-    
-class OrthogonalLoss(nn.Module):
-    def __init__(self):
-        super(OrthogonalLoss, self).__init__()
-
-    def forward(self, h1, h2):
-        h1_norm = F.normalize(h1, p=2, dim=-1)
-        h2_norm = F.normalize(h2, p=2, dim=-1)
-
-        correlation_matrix = torch.matmul(h1_norm.t(), h2_norm)
-
-        loss = torch.sum(correlation_matrix ** 2) / (h1.size(0) ** 2)
-        return loss
 
 
 class Transformer(nn.Module):
@@ -154,19 +139,21 @@ class Transformer(nn.Module):
         hrv_dim=100,
         embedding_dim=1024,
         fusion_dim=fusion_d_model,
-        num_embeddings=4,
     ):
         super(Transformer, self).__init__()
-        self.project = nn.Linear(embedding_dim, fusion_dim)
-        self.hrv_project = nn.Linear(hrv_dim, fusion_dim)
         self.concat_dim = fusion_dim * 2
-        self.num_embeddings = num_embeddings
         self.embedding_dim = embedding_dim
+        self.project = nn.Sequential(
+            nn.LayerNorm(embedding_dim),
+            nn.Linear(embedding_dim, 512),
+            nn.GELU(),
+            nn.Linear(512, fusion_dim)
+        )
 
-        self.source_projections = nn.ModuleList([
-            nn.Linear(embedding_dim, embedding_dim) for _ in range(num_embeddings)
-        ])
-        self.fusion_weights = nn.Parameter(torch.ones(self.num_embeddings))
+        self.hrv_project = nn.Sequential(
+            nn.Linear(100, fusion_dim),
+            nn.LayerNorm(fusion_dim)
+        )
 
         self.proj_head_hrv = nn.Sequential(
             nn.Linear(fusion_dim, fusion_dim),
@@ -212,7 +199,7 @@ class Transformer(nn.Module):
             all_padded = self.mask.all(dim=1)
             if all_padded.any():
                 raise RuntimeError(
-                    f"Found {all_padded.sum().item()} samples that are all padding,"
+                    f"Found {all_padded.sum().item()} samples with all padding，"
                 )
                 
         hrv_feature = x[:, :, :100]
@@ -221,18 +208,8 @@ class Transformer(nn.Module):
             text_embedding_all = torch.zeros_like(text_embedding_all)
         elif input_mode == 'text_only':
             hrv_feature = torch.zeros_like(hrv_feature)
-        B, S, _ = text_embedding_all.shape
-        text_embedding_all = text_embedding_all.reshape(B, S, self.num_embeddings, self.embedding_dim)
-        projected_sources = []
-        for k in range(self.num_embeddings):
-            proj = self.source_projections[k](text_embedding_all[:, :, k, :])
-            projected_sources.append(proj)
-            
-        stacked_sources = torch.stack(projected_sources, dim=2)
-        weights = F.softmax(self.fusion_weights, dim=0)
-        fused_text_1024 = torch.einsum('bsne,n->bse', stacked_sources, weights)
 
-        text_proj = self.project(fused_text_1024)
+        text_proj = self.project(text_embedding_all)
         hrv_proj = self.hrv_project(hrv_feature)
 
         x_new = hrv_proj
@@ -251,7 +228,7 @@ class Transformer(nn.Module):
             query=encoded_hrv,
             key=text_proj,
             value=text_proj,
-            key_padding_mask=self.mask 
+            key_padding_mask=self.mask
         )
         hrv_fused = self.norm_hrv(encoded_hrv + hrv_attended)
 
@@ -271,7 +248,7 @@ class Transformer(nn.Module):
         domain_output_embedding = self.domain_classifier1(reversed_feature)
         domain_output = self.domain_classifier2(domain_output_embedding)
 
-        return class_output, feature, class_output_embedding, domain_output, encoded_hrv, text_proj, z_hrv, z_text, projected_sources, hrv_to_text_weight, text_to_hrv_weight
+        return class_output, feature, class_output_embedding, domain_output, encoded_hrv, text_proj, z_hrv, z_text, hrv_to_text_weight, text_to_hrv_weight
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -280,7 +257,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 def mask(x, r, cap=None):
     n_keep = max(1, round(len(x) * r))
     if cap is not None:
-        n_keep = min(n_keep, cap)
+        n_keep = min(n_keep, cap) 
     x = x.sample(n=n_keep)
     x = x.sort_values(by='date')
     return x
@@ -318,6 +295,7 @@ def dataloader(x, mask_tf, batch_size):
         batch_x_array = np.zeros([len(batch_name), max_value, d_model])
         batch_y_array = np.zeros([len(batch_name), max_value]) - 1
         batch_ID_array = np.array([])
+        batch_record_ids = []
         batch_pss_array = np.zeros([len(batch_name), max_value]) - 1
 
         for i in range(len(batch_name)):
@@ -335,6 +313,7 @@ def dataloader(x, mask_tf, batch_size):
             batch_x_array[i][:len(tmp)] = tmp[feature_cols].values
             batch_y_array[i][:len(tmp)] = tmp['label_binarized'].values
             batch_ID_array = np.concatenate((batch_ID_array, tmp['ID'].values))
+            batch_record_ids.extend(tmp['record_id'].astype(str).tolist())
 
             if 'pss' in tmp.columns:
                 batch_pss_array[i][:len(tmp)] = tmp['pss'].values
@@ -347,7 +326,8 @@ def dataloader(x, mask_tf, batch_size):
         batch_y_array = torch.tensor(batch_y_array, dtype=torch.float32)
         src_key_padding_mask = torch.tensor(padding_mask, dtype=torch.bool)
         batch_pss_array = torch.tensor(batch_pss_array, dtype=torch.float32)
-        df.append([batch_x_array, batch_y_array, src_key_padding_mask, batch_ID_array, batch_pss_array])
+        df.append([batch_x_array, batch_y_array, src_key_padding_mask,
+                   batch_ID_array, batch_pss_array, np.asarray(batch_record_ids)])
 
     return df
 
@@ -393,7 +373,7 @@ per_id_data = {r: pd.DataFrame(columns=['ID', 'y_true', 'y_prob', 'y_pred']) for
 for run_name in run:
     seed_init(args.seed)
     wandb.init(project="ICASSP-2027", config=vars(args), reinit=True)
-    wandb.run.name = f"proposed"
+    wandb.run.name = f"baseline_rewrite"
     n_splits = 5
     #PATH = f'./model/model_{args.run}.pt'
     num_epoch = args.epochs
@@ -406,40 +386,34 @@ for run_name in run:
     pre_uar = None
     uar_idx = 0
 
-    print("\nLoading global word embeddings (all samples)...")
-    word_emb_paths = [
-        "./data/hrv_time_full_embedding.csv",
-        "./data/hrv_freq_full_embedding.csv",
-        "./data/hrv_ms_rr_full_embedding.csv",
-        "./data/hrv_ms_drr_full_embedding.csv",
-    ]
-    df_word_emb_list = []
-    word_emb_cols_by_src = [] 
-
-    for src_idx, path in enumerate(word_emb_paths):
-        df_e = pd.read_csv(path)
-        df_e['record_id'] = df_e['record_id'].astype(str)
-
-        rename_map = {f"emb_{i}": f"emb_src{src_idx}_{i}" for i in range(word_emb_dim)}
-        df_e = df_e.rename(columns=rename_map)
-        cols = list(rename_map.values())
-        word_emb_cols_by_src.append(cols)
-        df_word_emb_list.append(df_e[['record_id'] + cols])
-
-    word_emb_cols = [c for cols in word_emb_cols_by_src for c in cols]
-    print(f"Loaded {len(word_emb_paths)} embedding sources, total dim = {len(word_emb_cols)}")
+    word_emb_cols = [f"embedding_{i}" for i in range(word_emb_dim)]
     fold_list = ['fold-1', 'fold-2', 'fold-3', 'fold-4', 'fold-5']
-    BASE_PATH = './data/HRV_I5F_Tiles'
+    BASE_PATH = '.data//HRV_I5F_Tiles'
     for fold_name in fold_list:
         current_fold = int(fold_name.split('-')[1])
         print(f"\n================ {fold_name} ================")
         PATH = f'./model/model_{run_name}_{fold_name}.pt'
 
+        word_emb_path = "./data/baseline_rewrite_embedding.csv"
+        print(f"Loading embedding: {word_emb_path}")
+
+        df_word_emb = pd.read_csv(word_emb_path, dtype={'record_id': str})
+        if not all(col in df_word_emb.columns for col in word_emb_cols):
+            short_cols = [f"emb_{i}" for i in range(word_emb_dim)]
+            if not all(col in df_word_emb.columns for col in short_cols):
+                raise ValueError(f"{word_emb_path}: missing {word_emb_dim}D embedding columns")
+            df_word_emb = df_word_emb.rename(columns=dict(zip(short_cols, word_emb_cols)))
+        df_word_emb = df_word_emb[['record_id'] + word_emb_cols].rename(columns={'record_id': 'ID'})
+        if df_word_emb['ID'].isna().any() or df_word_emb['ID'].duplicated().any():
+            raise ValueError(f"{word_emb_path}: subject ID cannot be missing or duplicated")
+
+        print(f"Loaded {fold_name} embedding, samples = {len(df_word_emb)}, dim = {len(word_emb_cols)}")
+
         train_csv_path = os.path.join(BASE_PATH, fold_name, 'df_train_etc_stats_selectnum100.csv')
         test_csv_path = os.path.join(BASE_PATH, fold_name, 'df_test_etc_stats_selectnum100.csv')
 
-        df_train = pd.read_csv(train_csv_path)
-        df_test = pd.read_csv(test_csv_path)
+        df_train = pd.read_csv(train_csv_path, dtype={'ID': str, 'record_id': str})
+        df_test = pd.read_csv(test_csv_path, dtype={'ID': str, 'record_id': str})
 
         df_train.dropna(inplace=True)
         df_test.dropna(inplace=True)
@@ -452,12 +426,32 @@ for run_name in run:
         columns_train = list(df_train.columns)
         columns_test = list(df_test.columns)
 
-        df_train['record_id'] = df_train['ID'].astype(str) + '_' + df_train['date'].astype(str)
-        df_test['record_id'] = df_test['ID'].astype(str) + '_' + df_test['date'].astype(str)
+        for split_name, frame in [('train', df_train), ('test', df_test)]:
+            if 'record_id' not in frame:
+                frame['record_id'] = frame['ID'].astype(str) + '_' + frame['date'].astype(str)
+            elif frame['record_id'].isna().any() or frame['record_id'].astype(str).str.strip().eq('').any():
+                raise ValueError(f"{fold_name} {split_name}: record_id cannot be missing or empty")
+            else:
+                frame['record_id'] = frame['record_id'].astype(str).str.strip()
 
-        for df_e in df_word_emb_list:
-            df_train = pd.merge(df_train, df_e, on='record_id', how='inner')
-            df_test = pd.merge(df_test, df_e, on='record_id', how='inner')
+        if 'record_id' not in columns_train:
+            columns_train.append('record_id')
+        if 'record_id' not in columns_test:
+            columns_test.append('record_id')
+
+        aligned_frames = []
+        for split_name, frame in [('train', df_train), ('test', df_test)]:
+            aligned = frame.merge(
+                df_word_emb, on='ID', how='left', validate='many_to_one',
+                sort=False, indicator=True,
+            )
+            missing_ids = aligned.loc[aligned['_merge'] != 'both', 'ID'].unique()
+            if len(missing_ids):
+                raise ValueError(f"{fold_name} {split_name}: missing subject IDs in embedding: {missing_ids[:10].tolist()}")
+            if aligned[word_emb_cols].isna().any().any():
+                raise ValueError(f"{fold_name} {split_name}: embedding contains missing values")
+            aligned_frames.append(aligned.drop(columns='_merge'))
+        df_train, df_test = aligned_frames
         print(f"Training data label:\n{df_train['label_binarized'].value_counts()}")
 
         if 'label_binarized' in columns_train:
@@ -500,7 +494,7 @@ for run_name in run:
             unique_train_ids = df_train['ID'].unique()
             
         num_domain = len(unique_train_ids)
-
+        
         id_to_label = {uid: idx for idx, uid in enumerate(unique_train_ids)}
         
         if args.earlystop == 1:
@@ -510,10 +504,8 @@ for run_name in run:
             df_train = dataloader(df_train, args.mask, batch_size)
             df_val = df_test
 
-
-
         model = Transformer(original_d_model, num_heads, num_encoder_layers, dropout, hidden_channels, out_channels,
-                            num_domain=num_domain, hrv_dim=original_d_model, embedding_dim=word_emb_dim, fusion_dim=fusion_d_model, num_embeddings=num_embeddings)
+                            num_domain=num_domain, hrv_dim=original_d_model, embedding_dim=word_emb_dim, fusion_dim=fusion_d_model)
         model = model.to(device)
 
         ema = EMA(model, 0.9999)
@@ -524,7 +516,6 @@ for run_name in run:
         if args.loss_weight == 1:
             class_criterion = nn.CrossEntropyLoss(weight=class_weights, ignore_index=-1)
         ms_loss_criterion = losses.MultiSimilarityLoss(alpha=args.scale_pos, beta=args.scale_neg).to(device)
-        ortho_criterion = OrthogonalLoss().to(device)
         optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
         for p in model.parameters():
@@ -575,7 +566,7 @@ for run_name in run:
                 pss = torch.Tensor(trainbatch[4]).to(device)
 
 
-                y_pred, embedding, stress_embedding, domain_output, pure_hrv_feature, text_proj, z_hrv, z_text, projected_sources, hrv_to_text_weight, text_to_hrv_weight = model(x=x.float(), alpha=alpha, mask=padding_mask, input_mode=args.input_mode)
+                y_pred, embedding, stress_embedding, domain_output, pure_hrv_feature, text_proj, z_hrv, z_text, hrv_to_text_weight, text_to_hrv_weight = model(x=x.float(), alpha=alpha, mask=padding_mask, input_mode=args.input_mode)
 
                 y_ = []
                 yp_ = []
@@ -594,9 +585,10 @@ for run_name in run:
                     stress_embedding_train.extend(stress_embedding[yl][:tag].tolist())
 
                 ID_train.extend(ID)
+
                 y_flat = y.flatten()
                 y_pred_flat = y_pred.reshape(y_pred.shape[0] * y_pred.shape[1], -1)
-
+                
                 z_hrv_flat = z_hrv.reshape(-1, z_hrv.shape[-1])
                 z_text_flat = z_text.reshape(-1, z_text.shape[-1])
 
@@ -609,15 +601,15 @@ for run_name in run:
 
                 ID_array = np.array(ID)
                 y_valid_array = y_valid.cpu().numpy()
-
+                
                 intra_classes = [f"{uid}_{int(lbl)}" for uid, lbl in zip(ID_array, y_valid_array)]
-
+                
                 _, intra_labels_np = np.unique(intra_classes, return_inverse=True)
                 intra_labels = torch.tensor(intra_labels_np).to(device)
 
                 if len(y_valid) > 0:
                     combined_features = torch.cat([z_hrv_valid, z_text_valid], dim=0)
-
+                    
                     combined_inter_labels = torch.cat([y_valid, y_valid], dim=0)
                     ms_loss_inter = ms_loss_criterion(combined_features, combined_inter_labels.to(torch.int64))
 
@@ -633,26 +625,18 @@ for run_name in run:
                                        (args.lambda_align * ms_loss_align)
                 else:
                     weighted_ms_loss = torch.tensor(0.0).to(device)
-                
-                ortho_loss = torch.tensor(0.0).to(device)
                 domain_output_flat = domain_output.reshape(domain_output.shape[0] * domain_output.shape[1], -1)
                 valid_domain_labels = [id_to_label[uid] for uid in ID_array]
                 valid_domain_labels_tensor = torch.tensor(valid_domain_labels, dtype=torch.int64).to(device)
+                
                 valid_domain_preds = domain_output_flat[valid_mask]
                 
                 if len(valid_domain_labels) > 0:
                     domain_loss = domain_criterion(valid_domain_preds, valid_domain_labels_tensor)
                 else:
                     domain_loss = torch.tensor(0.0).to(device)
-                if len(y_valid) > 0:
-                    valid_projs = []
-                    for proj in projected_sources:
-                        proj_flat = proj.reshape(-1, proj.shape[-1])
-                        valid_projs.append(proj_flat[valid_mask])
-                    for idx1 in range(len(valid_projs)):
-                        for idx2 in range(idx1 + 1, len(valid_projs)):
-                            ortho_loss += ortho_criterion(valid_projs[idx1], valid_projs[idx2])
-                loss = class_loss + weighted_ms_loss + (args.lambda_ortho * ortho_loss) + (args.lambda_domain * domain_loss)
+
+                loss = class_loss + weighted_ms_loss + (args.lambda_domain * domain_loss)
                 loss = loss / current_accum
 
                 loss.backward()
@@ -708,7 +692,7 @@ for run_name in run:
                     ID = valbatch[3]
                     pss = torch.Tensor(valbatch[4]).to(device)
 
-                    y_pred, embedding, stress_embedding, domain_output, pure_hrv_feature, text_proj, z_hrv, z_text, projected_sources, hrv_to_text_weight, text_to_hrv_weight = model(x=x.float(), alpha=alpha, mask=padding_mask, input_mode=args.input_mode)
+                    y_pred, embedding, stress_embedding, domain_output, pure_hrv_feature, text_proj, z_hrv, z_text, hrv_to_text_weight, text_to_hrv_weight = model(x=x.float(), alpha=alpha, mask=padding_mask, input_mode=args.input_mode)
                     if i == 0:
                         sample_hrv2text_w = hrv_to_text_weight[0].cpu().numpy()
                         sample_text2hrv_w = text_to_hrv_weight[0].cpu().numpy()
@@ -763,7 +747,7 @@ for run_name in run:
                         pre_uar = val_uar
                         uar_idx = 0
                     else:
-                        if epoch > 50: 
+                        if epoch > 50:
                             uar_idx += 1
                     
                     if uar_idx >= args.earlystop_limit:
@@ -773,12 +757,6 @@ for run_name in run:
 
                 test_loss = total_loss / (num + 1)
                 test_epoch_loss.append(test_loss)
-                
-                with torch.no_grad():
-                    raw_weights = model.fusion_weights
-                    normalized_weights = F.softmax(raw_weights, dim=0).cpu().numpy()
-                    weight_names = ["weight_time", "weight_freq", "weight_ms_rr", "weight_ms_drr"]
-                    weight_dict = {name: val for name, val in zip(weight_names, normalized_weights)}
 
                 wandb.log({
                     "train_loss": train_loss,
@@ -786,7 +764,6 @@ for run_name in run:
                     "test_loss": test_loss,
                     "test_acc": test_acc,
                     "test_uar": val_uar,
-                    **weight_dict
                 })
 
             end_time = time.time()
@@ -795,6 +772,7 @@ for run_name in run:
             if (epoch + 1) % 10 == 0:
                 print("epoch{}, Train acc: {:.3f}, Train loss: {:.3f}, test loss: {:.3f}, test acc: {:.3f}, val uar {:.3f}".format(
                     epoch + 1, train_acc, train_loss, test_loss, test_acc, val_uar))
+
             ema.restore()
 
         ema.apply_shadow()
@@ -809,6 +787,7 @@ for run_name in run:
         y_test_ = []
         y_prob_ = []
         ID_test_ = []
+        record_ids_test = []
         alpha = 0
         
 
@@ -820,8 +799,9 @@ for run_name in run:
                 y = torch.Tensor(testbatch[1]).to(device)
                 padding_mask = testbatch[2].to(device)
                 batch_IDs = testbatch[3]
+                batch_record_ids = testbatch[5]
 
-                y_pred, embedding, stress_embedding, domain_output, pure_hrv_feature, text_proj, z_hrv, z_text, projected_sources, hrv_to_text_weight, text_to_hrv_weight = model(x=x.float(), alpha=alpha, mask=padding_mask, input_mode=args.input_mode)
+                y_pred, embedding, stress_embedding, domain_output, pure_hrv_feature, text_proj, z_hrv, z_text, hrv_to_text_weight, text_to_hrv_weight = model(x=x.float(), alpha=alpha, mask=padding_mask, input_mode=args.input_mode)
 
                 y_ = []
                 yp_ = []
@@ -832,11 +812,14 @@ for run_name in run:
                     y_.extend(y[yl][:tag].tolist())
                     yp_.extend(y_pred[yl][:tag].tolist())
                     ID_test_.extend(batch_IDs[current_id_idx : current_id_idx + tag].tolist())
+                    record_ids_test.extend(
+                        batch_record_ids[current_id_idx : current_id_idx + tag].tolist()
+                    )
                     current_id_idx += tag
 
                 yp_tensor = torch.tensor(yp_)
                 probs = F.softmax(yp_tensor, dim=1)[:, 1].numpy() 
-
+                
                 y_pred_hard = np.argmax(yp_, axis=1)
 
                 y_pred_.extend(y_pred_hard)
@@ -848,8 +831,11 @@ for run_name in run:
         y_test_ = np.array(y_test_)
         roc_data[run_name]['y_true'].extend(y_test_)
         roc_data[run_name]['y_prob'].extend(y_prob_)
+        if not (len(ID_test_) == len(record_ids_test) == len(y_test_) == len(y_pred_)):
+            raise RuntimeError(f'{fold_name}: record_id, ID, GT and prediction doesn\'t match')
         fold_df = pd.DataFrame({
             'ID': ID_test_,
+            'record_id': record_ids_test,
             'y_true': y_test_,
             'y_prob': y_prob_,
             'y_pred': y_pred_
@@ -857,7 +843,7 @@ for run_name in run:
         per_id_data[run_name] = pd.concat([per_id_data[run_name], fold_df], ignore_index=True)
 
         cm = confusion_matrix(y_test_, y_pred_)
-
+        
         fold_acc = accuracy_score(y_test_, y_pred_)
         fold_f1 = f1_score(y_test_, y_pred_)
         fold_uar = recall_score(y_test_, y_pred_, average='macro')
@@ -883,11 +869,12 @@ for run_name in run:
             "fold_test/specificity": fold_spec
         })
 
-        print(f"\nSaving {fold_name} results and metrics...")
-
-        raw_output_path = f"./result_analysis/raw_predictions_tiles_{fold_name}.csv"
+        print(f"\nSaving {fold_name} predictions...")
+        
+        os.makedirs('./result_analysis', exist_ok=True)
+        raw_output_path = f"./result_analysis/raw_predictions_baseline_rewrite_fold_{fold_name}.csv"
         fold_df.to_csv(raw_output_path, index=False)
-        print(f"[{fold_name}]'s raw predictions saved to: {raw_output_path}")
+        print(f"[{fold_name}] original predictions saved to: {raw_output_path}")
 
         id_metrics = []
         for subject_id, group in fold_df.groupby('ID'):
@@ -921,7 +908,7 @@ for run_name in run:
             })
             
         df_metrics = pd.DataFrame(id_metrics)
-        print(f"\n[{fold_name}] Per-ID Statistics:")
+        print(f"\n[{fold_name}] Per-ID metrics:")
         print(df_metrics.to_string(index=False))
         print("\n")
 
@@ -936,7 +923,7 @@ for run_name in run:
         })
     wandb.finish()
 print("\n" + "="*60)
-print("5-Fold Cross Validation results:")
+print("5-Fold Cross Validation results：")
 print("="*60)
 
 for run_name, metrics in experiment_results.items():

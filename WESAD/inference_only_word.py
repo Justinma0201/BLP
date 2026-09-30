@@ -151,8 +151,8 @@ if __name__ == "__main__":
 
     merged_model_path = "Qwen/Qwen3.5-9B"
 
-    input_jsonl = "./data/hrv_full_only_word.jsonl"
-    output_csv = "./data/hrv_generated_only_word.csv"
+    input_jsonl = "./data/wesad_baseline_only_word.jsonl"
+    output_csv = "./data/wesad_baseline_only_word_rewrite.csv"
 
     print("=" * 70)
     print("WESAD Qwen3.5 HRV Transformers Inference")
