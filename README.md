@@ -79,11 +79,9 @@ Intermediate HRV tables, descriptions, JSONL prompts, and embedding CSVs are sto
 | `utlis/multisimilarityloss.py` | Provide the custom attribute-aware multi-similarity loss utility. |
 | `utlis/hist.py` | Provide class-distribution and hypergraph utilities. |
 
-The active training loss uses `pytorch_metric_learning.losses.MultiSimilarityLoss`. The two local loss/hypergraph utilities are retained as supporting code.
-
 ## Experimental Settings
 
-Values below reflect the current script defaults and can be revised for the final experimental configuration. Unless shown separately, a setting applies to both datasets.
+Values below reflect the current script defaults.
 
 | Parameter | TILES-2018 | WESAD |
 | --- | --- | --- |
